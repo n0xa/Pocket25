@@ -9,6 +9,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <set>
+#include <mutex>
+#include <atomic>
 
 #define LOG_TAG "DSD-Flutter"
 #define LOG_TAG_OUTPUT "DSD-Output"
@@ -41,10 +44,11 @@ int dsd_rtl_stream_tune(dsd_opts* opts, long int frequency);
 static dsd_opts* g_opts = nullptr;
 static dsd_state* g_state = nullptr;
 static JavaVM* g_jvm = nullptr;
-static pthread_t g_engine_thread;
-static pthread_t g_stderr_thread;
-static pthread_t g_poll_thread;
-static bool g_engine_running = false;
+static pthread_t g_engine_thread = 0;
+static pthread_t g_stderr_thread = 0;
+static pthread_t g_poll_thread = 0;
+static std::atomic<bool> g_engine_running{false};
+static std::mutex g_engine_lifecycle_mutex;  // Protect start/stop sequences
 static int g_stderr_pipe[2] = {-1, -1};
 static pthread_t g_hackrf_tcp_server_thread;
 static int g_hackrf_tcp_server_sock = -1;
@@ -80,10 +84,6 @@ static int g_last_aff_count = 0;
 // ============================================================================
 // Talkgroup Filtering (Whitelist/Blacklist)
 // ============================================================================
-
-#include <set>
-#include <mutex>
-#include <atomic>
 
 enum FilterMode {
     FILTER_MODE_DISABLED = 0,  // No filtering - hear all calls
@@ -699,7 +699,7 @@ static void send_aff_event_to_flutter(
 static void* poll_thread_func(void* arg) {
     LOGI("Poll thread started");
     
-    while (g_engine_running && g_state) {
+    while (g_engine_running.load() && g_state) {
         // Check for call state changes
         // For DMR TDMA: slot 1 uses lasttg/lastsrc, slot 2 uses lasttgR/lastsrcR
         int tg = g_state->lasttg;
@@ -1001,7 +1001,6 @@ static void* engine_thread_func(void* arg) {
         LOGI("Engine exited with code %d", rc);
     }
     
-    g_engine_running = false;
     LOGI("Engine thread finished");
     return nullptr;
 }
@@ -1054,10 +1053,17 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeInit(
     
     if (g_opts) {
         LOGI("Already initialized, cleaning up first");
-        if (g_engine_running) {
+        if (g_engine_running.load()) {
             exitflag = 1;
-            pthread_join(g_engine_thread, nullptr);
-            pthread_join(g_poll_thread, nullptr);
+            if (g_engine_thread != 0) {
+                pthread_join(g_engine_thread, nullptr);
+                g_engine_thread = 0;
+            }
+            if (g_poll_thread != 0) {
+                pthread_join(g_poll_thread, nullptr);
+                g_poll_thread = 0;
+            }
+            g_engine_running.store(false);
         }
         if (g_state) {
             freeState(g_state);
@@ -1278,9 +1284,11 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeStart(
     JNIEnv* env,
     jobject thiz) {
     
+    std::lock_guard<std::mutex> lifecycle_lock(g_engine_lifecycle_mutex);
+    
     LOGI("Starting DSD engine");
     
-    if (g_engine_running) {
+    if (g_engine_running.load()) {
         LOGI("Engine already running");
         return;
     }
@@ -1329,12 +1337,12 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeStart(
         g_last_src = 0;
         
         exitflag = 0;
-        g_engine_running = true;
+        g_engine_running.store(true);
         
         int rc = pthread_create(&g_engine_thread, nullptr, engine_thread_func, nullptr);
         if (rc != 0) {
             LOGE("Failed to create engine thread: %d", rc);
-            g_engine_running = false;
+            g_engine_running.store(false);
         } else {
             LOGI("Engine thread created");
             
@@ -1342,6 +1350,11 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeStart(
             rc = pthread_create(&g_poll_thread, nullptr, poll_thread_func, nullptr);
             if (rc != 0) {
                 LOGE("Failed to create poll thread: %d", rc);
+                // Stop engine thread since poll thread failed
+                exitflag = 1;
+                g_engine_running.store(false);
+                pthread_join(g_engine_thread, nullptr);
+                g_engine_thread = 0;
             } else {
                 LOGI("Poll thread created");
             }
@@ -1356,27 +1369,46 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeStop(
     JNIEnv* env,
     jobject thiz) {
     
+    std::lock_guard<std::mutex> lifecycle_lock(g_engine_lifecycle_mutex);
+    
     LOGI("Stopping DSD engine");
     
-    if (g_engine_running) {
-        exitflag = 1;
-        g_engine_running = false;  // Signal poll thread to stop
-        pthread_join(g_engine_thread, nullptr);
-        pthread_join(g_poll_thread, nullptr);
-        LOGI("Engine threads stopped");
-        
-        // Reset P25 state to prevent retune to old system
-        if (g_state) {
-            LOGI("Clearing P25 frequency identifier tables");
-            p25_reset_iden_tables(g_state);
-        }
-        if (g_opts && g_state) {
-            LOGI("Reinitializing P25 trunking state machine");
-            p25_sm_init(g_opts, g_state);
-        }
-        
-        LOGI("Engine stopped");
+    if (!g_engine_running.load()) {
+        LOGI("Engine not running");
+        return;
     }
+    
+    // Signal threads to stop - MUST set BOTH flags before joining
+    exitflag = 1;
+    g_engine_running.store(false);  // Poll thread checks this in while loop
+    
+    LOGI("Waiting for threads to finish...");
+    
+    // Wait for threads to finish
+    if (g_engine_thread != 0) {
+        pthread_join(g_engine_thread, nullptr);
+        g_engine_thread = 0;
+        LOGI("Engine thread joined");
+    }
+    if (g_poll_thread != 0) {
+        pthread_join(g_poll_thread, nullptr);
+        g_poll_thread = 0;
+        LOGI("Poll thread joined");
+    }
+    
+    LOGI("Engine threads stopped");
+    
+    // Reset P25 state to prevent retune to old system
+    if (g_state) {
+        LOGI("Clearing P25 frequency identifier tables");
+        p25_reset_iden_tables(g_state);
+    }
+    if (g_opts && g_state) {
+        LOGI("Reinitializing P25 trunking state machine");
+        p25_sm_init(g_opts, g_state);
+    }
+    
+    LOGI("Engine stopped");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -1386,11 +1418,17 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeCleanup(
     
     LOGI("Cleaning up DSD library");
     
-    if (g_engine_running) {
+    if (g_engine_running.load()) {
         exitflag = 1;
-        g_engine_running = false;
-        pthread_join(g_engine_thread, nullptr);
-        pthread_join(g_poll_thread, nullptr);
+        if (g_engine_thread != 0) {
+            pthread_join(g_engine_thread, nullptr);
+            g_engine_thread = 0;
+        }
+        if (g_poll_thread != 0) {
+            pthread_join(g_poll_thread, nullptr);
+            g_poll_thread = 0;
+        }
+        g_engine_running.store(false);
     }
     
     if (g_state) {
@@ -2157,7 +2195,7 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeRetune(
     jobject thiz,
     jint freqHz) {
     
-    if (!g_opts || !g_engine_running) {
+    if (!g_opts || !g_engine_running.load()) {
         LOGE("Cannot retune: DSD engine not running");
         return JNI_FALSE;
     }
@@ -2222,7 +2260,7 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeSetBiasTee(
     }
     
     // Apply immediately if engine is running
-    if (g_engine_running) {
+    if (g_engine_running.load()) {
         int result = rtl_stream_set_bias_tee(on);
         if (result == 0) {
             LOGI("Bias-tee %s successfully", on ? "enabled" : "disabled");
