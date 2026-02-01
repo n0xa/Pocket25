@@ -1260,8 +1260,8 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeConnect(
         g_opts->slot2_on = 0;
         g_opts->slot_preference = 0;  // Prefer slot 1
         
-        // Disable P25 trunk following by default (enable it when needed via setTrunkFollowing)
-        g_opts->p25_trunk = 0;
+        // Enable P25 trunk state preservation (needed for call tracking)
+        g_opts->p25_trunk = 1;
         
         LOGI("Configured for rtl_tcp input: %s", g_opts->audio_in_dev);
         LOGI("Bias-tee setting: %d", g_opts->rtl_bias_tee);
@@ -1693,8 +1693,8 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeOpenRtlSdrUsb(
     g_opts->slot2_on = 0;
     g_opts->slot_preference = 0;  // Prefer slot 1
     
-    // Disable P25 trunk following by default (enable it when needed via setTrunkFollowing)
-    g_opts->p25_trunk = 0;
+    // Enable P25 trunk state preservation (needed for call tracking)
+    g_opts->p25_trunk = 1;
     
     env->ReleaseStringUTFChars(devicePath, path);
     
@@ -2026,7 +2026,7 @@ Java_com_example_dsd_1flutter_DsdFlutterPlugin_nativeStartHackRfMode(
     g_opts->slot_preference = 0;
     
     // Disable P25 trunk following by default (enable it when needed via setTrunkFollowing)
-    g_opts->p25_trunk = 0;
+    g_opts->p25_trunk = 1;
     g_opts->p25_is_tuned = 1;
     
     g_hackrf_mode = true;

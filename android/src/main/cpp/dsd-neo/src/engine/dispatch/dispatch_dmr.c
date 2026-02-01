@@ -79,9 +79,8 @@ dsd_dispatch_handle_dmr(dsd_opts* opts, dsd_state* state) {
                 if ((opts->mbe_out_dir[0] != 0) && (opts->mbe_out_f == NULL)) {
                     openMbeOutFile(opts, state);
                 }
-                if (opts->p25_trunk == 0) {
-                    dmrMSBootstrap(opts, state);
-                }
+                // Always bootstrap for DMR MS voice (simplex/direct mode)
+                dmrMSBootstrap(opts, state);
             }
             if (opts->dmr_stereo == 1) //opts->dmr_stereo == 1
             {
@@ -91,9 +90,8 @@ dsd_dispatch_handle_dmr(dsd_opts* opts, dsd_state* state) {
                     if ((opts->mbe_out_dir[0] != 0) && (opts->mbe_out_f == NULL)) {
                         openMbeOutFile(opts, state);
                     }
-                    if (opts->p25_trunk == 0) {
-                        dmrMSBootstrap(opts, state); //bootstrap into MS Bootstrap (voice only)
-                    }
+                    // Always bootstrap for DMR MS voice (simplex/direct mode)
+                    dmrMSBootstrap(opts, state);
                 } else {
                     dmrBSBootstrap(opts, state); //bootstrap into BS Bootstrap
                 }
@@ -107,9 +105,8 @@ dsd_dispatch_handle_dmr(dsd_opts* opts, dsd_state* state) {
             if (opts->mbe_out_fR != NULL) {
                 closeMbeOutFileR(opts, state);
             }
-            if (opts->p25_trunk == 0) {
-                dmrMSData(opts, state);
-            }
+            // Always process DMR MS data (simplex/direct mode)
+            dmrMSData(opts, state);
         } else {
             if (opts->dmr_stereo == 0) {
                 if (opts->mbe_out_f != NULL) {

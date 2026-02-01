@@ -241,17 +241,19 @@ class ScanningService extends ChangeNotifier {
       final tsbkOk = event['tsbkOk'] as int? ?? 0;
       final tsbkErr = event['tsbkErr'] as int? ?? 0;
       final hasSync = event['hasSync'] as bool? ?? false;
-      final syncType = event['syncType'] as String? ?? event['frameType'] as String? ?? '';
+      final synctype = event['synctype'] as int? ?? -1;
       
-      // Detect protocol from sync type or frame type
-      final isDMR = syncType.contains('DMR') || syncType.contains('+DMR');
-      final isP25 = syncType.contains('P25') || syncType.contains('+P25');
+      // Detect protocol from synctype integer
+      // DMR: 10-13 (BS), 32-34 (MS/RC)
+      // P25: 0-1 (Phase 1), 35-36 (Phase 2)
+      final isDMR = (synctype >= 10 && synctype <= 13) || (synctype >= 32 && synctype <= 34);
+      final isP25 = (synctype >= 0 && synctype <= 1) || (synctype >= 35 && synctype <= 36);
       
       if (kDebugMode && hasSync) {
-        print('Sync detected: $syncType (DMR: $isDMR, P25: $isP25)');
+        print('Sync detected: synctype=$synctype (DMR: $isDMR, P25: $isP25)');
       }
       
-      // Update counters (P25-specific but no harm keeping them)
+      // Update counters
       if (tsbkOk > _tsbkCount) {
         _tsbkCount = tsbkOk;
         _lastTsbkTime = DateTime.now();
