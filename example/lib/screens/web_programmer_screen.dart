@@ -91,7 +91,8 @@ class _WebProgrammerScreenState extends State<WebProgrammerScreen> {
 
   @override
   void dispose() {
-    _webService?.stopServer();
+    // Don't stop server on dispose - let it run in background
+    // Users can manually stop via the toggle switch
     super.dispose();
   }
 

@@ -9,14 +9,25 @@ import 'database_service.dart';
 import 'scanning_service.dart';
 
 class WebProgrammerService {
+  // Singleton pattern
+  static WebProgrammerService? _instance;
+  
   HttpServer? _server;
   bool _isRunning = false;
   static const int _port = 8080;
   final DatabaseService _dbService = DatabaseService();
-  final ScanningService? _scanningService;
+  ScanningService? _scanningService;
 
-  WebProgrammerService({ScanningService? scanningService}) 
-      : _scanningService = scanningService;
+  WebProgrammerService._internal();
+
+  factory WebProgrammerService({ScanningService? scanningService}) {
+    _instance ??= WebProgrammerService._internal();
+    // Update scanning service reference if provided
+    if (scanningService != null) {
+      _instance!._scanningService = scanningService;
+    }
+    return _instance!;
+  }
 
   bool get isRunning => _isRunning;
   int get port => _port;
