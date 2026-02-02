@@ -166,8 +166,36 @@ class ScannerScreen extends StatelessWidget {
                 Divider(color: Colors.grey[700], height: 1),
                 SizedBox(height: _spacing(context, 12)),
                 
-                // Site information row
-                if (scanningService.currentSiteName != null)
+                // Display channel/system information
+                // For Quick Scan or Conventional: Show channel name + frequency
+                // For System scanning: Show site name + control channel frequency
+                if (scanningService.currentChannelName != null)
+                  // Quick Scan or Conventional Channel mode
+                  Padding(
+                    padding: EdgeInsets.only(bottom: _spacing(context, 8)),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildCompactInfoRow(
+                          Icons.radio,
+                          scanningService.currentChannelName!,
+                          Colors.cyan,
+                          context,
+                        ),
+                        if (scanningService.currentFrequency != null) ...[
+                          SizedBox(height: _spacing(context, 4)),
+                          _buildCompactInfoRow(
+                            Icons.settings_input_antenna,
+                            '${scanningService.currentFrequency!.toStringAsFixed(4)} MHz',
+                            Colors.blue,
+                            context,
+                          ),
+                        ],
+                      ],
+                    ),
+                  )
+                else if (scanningService.currentSiteName != null)
+                  // System scanning mode - Site information row
                   Padding(
                     padding: EdgeInsets.only(bottom: _spacing(context, 8)),
                     child: Row(
@@ -200,8 +228,8 @@ class ScannerScreen extends StatelessWidget {
                     ),
                   ),
                 
-                // Control Channel info
-                if (scanningService.currentFrequency != null)
+                // Control Channel info (for system scanning)
+                if (scanningService.currentSiteName != null && scanningService.currentFrequency != null)
                   _buildCompactInfoRow(
                     Icons.settings_input_antenna,
                     '${scanningService.currentFrequency!.toStringAsFixed(4)} MHz'

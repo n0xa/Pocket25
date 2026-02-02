@@ -30,49 +30,29 @@ class ConventionalChannelsScreen extends StatefulWidget {
   State<ConventionalChannelsScreen> createState() => _ConventionalChannelsScreenState();
 }
 
-class _ConventionalChannelsScreenState extends State<ConventionalChannelsScreen> with SingleTickerProviderStateMixin {
+class _ConventionalChannelsScreenState extends State<ConventionalChannelsScreen> {
   final DatabaseService _db = DatabaseService();
-  final TextEditingController _searchController = TextEditingController();
   
-  late TabController _tabController;
   List<ConventionalChannel> _allChannels = [];
-  List<ConventionalChannel> _filteredChannels = [];
+  List<List<ConventionalChannel>> _channelPages = [];
   List<ConventionalBank> _banks = [];
   bool _isLoading = true;
   int _selectedBankId = -1; // -1 = All, 0 = Favorites, >0 = specific bank
+  int _currentPage = 0;
+  int _itemsPerPage = 9; // Will be calculated dynamically
+  late PageController _pageController;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
-    _tabController.addListener(_onTabChanged);
+    _pageController = PageController();
     _loadData();
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
-    _searchController.dispose();
+    _pageController.dispose();
     super.dispose();
-  }
-
-  void _onTabChanged() {
-    if (_tabController.indexIsChanging) {
-      setState(() {
-        _searchController.clear();
-        switch (_tabController.index) {
-          case 0: // All
-            _selectedBankId = -1;
-            break;
-          case 1: // Favorites
-            _selectedBankId = 0;
-            break;
-          case 2: // Banks - keep current selection
-            break;
-        }
-      });
-      _filterChannels();
-    }
   }
 
   Future<void> _loadData() async {
@@ -112,30 +92,68 @@ class _ConventionalChannelsScreenState extends State<ConventionalChannelsScreen>
   }
 
   void _filterChannels() {
+    List<ConventionalChannel> filtered = List.from(_allChannels);
+    
+    // Filter by bank selection
+    if (_selectedBankId == 0) {
+      // Favorites
+      filtered = filtered.where((ch) => ch.favorite).toList();
+    } else if (_selectedBankId > 0) {
+      // Specific bank
+      filtered = filtered.where((ch) => ch.bankIds.contains(_selectedBankId)).toList();
+    }
+    
+    // Split into pages based on items per page
+    final pages = <List<ConventionalChannel>>[];
+    for (int i = 0; i < filtered.length; i += _itemsPerPage) {
+      final end = (i + _itemsPerPage < filtered.length) ? i + _itemsPerPage : filtered.length;
+      pages.add(filtered.sublist(i, end));
+    }
+
     setState(() {
-      List<ConventionalChannel> filtered = List.from(_allChannels);
-      
-      // Filter by tab
-      if (_selectedBankId == 0) {
-        // Favorites
-        filtered = filtered.where((ch) => ch.favorite).toList();
-      } else if (_selectedBankId > 0) {
-        // Specific bank
-        filtered = filtered.where((ch) => ch.bankIds.contains(_selectedBankId)).toList();
-      }
-      
-      // Filter by search
-      final query = _searchController.text.toLowerCase();
-      if (query.isNotEmpty) {
-        filtered = filtered.where((ch) {
-          return ch.channelName.toLowerCase().contains(query) ||
-                 ch.frequency.toString().contains(query) ||
-                 (ch.notes?.toLowerCase().contains(query) ?? false);
-        }).toList();
-      }
-      
-      _filteredChannels = filtered;
+      _channelPages = pages;
+      _currentPage = 0; // Reset to first page when filter changes
     });
+  }
+
+  void _recalculatePages() {
+    // Recalculate pages based on new items per page
+    List<ConventionalChannel> filtered = List.from(_allChannels);
+    
+    if (_selectedBankId == 0) {
+      filtered = filtered.where((ch) => ch.favorite).toList();
+    } else if (_selectedBankId > 0) {
+      filtered = filtered.where((ch) => ch.bankIds.contains(_selectedBankId)).toList();
+    }
+    
+    final pages = <List<ConventionalChannel>>[];
+    for (int i = 0; i < filtered.length; i += _itemsPerPage) {
+      final end = (i + _itemsPerPage < filtered.length) ? i + _itemsPerPage : filtered.length;
+      pages.add(filtered.sublist(i, end));
+    }
+    
+    // Make sure current page is still valid
+    int newCurrentPage = _currentPage;
+    if (newCurrentPage >= pages.length && pages.isNotEmpty) {
+      newCurrentPage = pages.length - 1;
+    }
+    
+    setState(() {
+      _channelPages = pages;
+      _currentPage = newCurrentPage;
+    });
+    
+    // Jump to the current page in case page count changed
+    if (pages.isNotEmpty && _pageController.hasClients) {
+      _pageController.jumpToPage(newCurrentPage);
+    }
+  }
+
+  void _onBankFilterChanged(int? bankId) {
+    setState(() {
+      _selectedBankId = bankId ?? -1;
+    });
+    _filterChannels();
   }
 
   Future<void> _tuneToChannel(ConventionalChannel channel) async {
@@ -247,6 +265,10 @@ class _ConventionalChannelsScreenState extends State<ConventionalChannelsScreen>
       
       // Clear any current system selection
       widget.scanningService.clearCurrentSystem();
+      
+      // Set the channel name and frequency for display
+      widget.scanningService.setChannelName(channel.channelName);
+      widget.scanningService.setCurrentFrequency(channel.frequency);
 
       // Start DSD
       widget.onStart();
@@ -289,13 +311,17 @@ class _ConventionalChannelsScreenState extends State<ConventionalChannelsScreen>
   void _showChannelContextMenu(ConventionalChannel channel) {
     showModalBottomSheet(
       context: context,
+      backgroundColor: const Color(0xFF2A2A2A),
       builder: (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: Icon(channel.favorite ? Icons.star : Icons.star_border),
-              title: Text(channel.favorite ? 'Remove from Favorites' : 'Add to Favorites'),
+              leading: Icon(channel.favorite ? Icons.star : Icons.star_border, color: Colors.amber),
+              title: Text(
+                channel.favorite ? 'Remove from Favorites' : 'Add to Favorites',
+                style: const TextStyle(color: Colors.white),
+              ),
               onTap: () async {
                 Navigator.pop(context);
                 await _db.toggleChannelFavorite(channel.id!);
@@ -303,8 +329,8 @@ class _ConventionalChannelsScreenState extends State<ConventionalChannelsScreen>
               },
             ),
             ListTile(
-              leading: const Icon(Icons.edit),
-              title: const Text('Edit'),
+              leading: const Icon(Icons.edit, color: Colors.cyan),
+              title: const Text('Edit', style: TextStyle(color: Colors.white)),
               onTap: () {
                 Navigator.pop(context);
                 _editChannel(channel);
@@ -343,8 +369,9 @@ class _ConventionalChannelsScreenState extends State<ConventionalChannelsScreen>
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete Channel'),
-        content: Text('Delete "${channel.channelName}"?'),
+        backgroundColor: const Color(0xFF2A2A2A),
+        title: const Text('Delete Channel', style: TextStyle(color: Colors.white)),
+        content: Text('Delete "${channel.channelName}"?', style: const TextStyle(color: Colors.white70)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -368,182 +395,297 @@ class _ConventionalChannelsScreenState extends State<ConventionalChannelsScreen>
     );
   }
 
-  Widget _buildChannelTile(ConventionalChannel channel) {
-    final bankNames = _banks
-        .where((bank) => channel.bankIds.contains(bank.id))
-        .map((bank) => bank.bankName)
-        .join(', ');
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      child: ListTile(
-        leading: channel.favorite
-            ? const Icon(Icons.star, color: Colors.amber)
-            : const Icon(Icons.radio),
-        title: Text(
-          channel.channelName,
-          style: const TextStyle(fontWeight: FontWeight.bold),
+  Widget _buildChannelGrid() {
+    if (_channelPages.isEmpty) {
+      return Center(
+        child: Text(
+          'No channels found.\nTap + to add a channel.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: Colors.grey[400],
+            fontSize: 16,
+          ),
         ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('${channel.frequencyDisplay} | ${channel.modulationBadge}'),
-            if (bankNames.isNotEmpty)
-              Text(
-                bankNames,
-                style: TextStyle(fontSize: 11, color: Colors.grey[400]),
-              ),
-          ],
-        ),
-        trailing: Chip(
-          label: Text(channel.modulationBadge, style: const TextStyle(fontSize: 11)),
-          backgroundColor: _getModulationColor(channel.modulation),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-        ),
-        onTap: () => _tuneToChannel(channel),
-        onLongPress: () => _showChannelContextMenu(channel),
-      ),
-    );
-  }
-
-  Color _getModulationColor(String modulation) {
-    switch (modulation.toUpperCase()) {
-      case 'P25':
-        return Colors.cyan.withOpacity(0.3);
-      case 'DMR':
-        return Colors.blue.withOpacity(0.3);
-      case 'NXDN':
-        return Colors.purple.withOpacity(0.3);
-      case 'DSTAR':
-        return Colors.orange.withOpacity(0.3);
-      case 'YSF':
-        return Colors.teal.withOpacity(0.3);
-      default:
-        return Colors.grey.withOpacity(0.3);
+      );
     }
-  }
-
-  Widget _buildBankSelector() {
-    if (_banks.isEmpty) return const SizedBox.shrink();
     
-    return Container(
-      height: 50,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: _banks.length,
-        itemBuilder: (context, index) {
-          final bank = _banks[index];
-          final isSelected = _selectedBankId == bank.id;
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: FilterChip(
-              label: Text('${bank.bankName} (${bank.channelCount})'),
-              selected: isSelected,
-              onSelected: (selected) {
-                setState(() {
-                  _selectedBankId = selected ? bank.id! : -1;
-                });
-                _filterChannels();
-              },
-            ),
-          );
-        },
-      ),
-    );
-  }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Calculate optimal grid size based on available space
+        const double minButtonHeight = 80.0;
+        const double minButtonWidth = 100.0;
+        const double gridSpacing = 8.0;
+        
+        // Calculate how many columns fit
+        int columns = (constraints.maxWidth / (minButtonWidth + gridSpacing)).floor();
+        columns = columns.clamp(2, 4); // Min 2, max 4 columns
+        
+        // Calculate how many rows fit
+        int rows = (constraints.maxHeight / (minButtonHeight + gridSpacing)).floor();
+        rows = rows.clamp(2, 5); // Min 2, max 5 rows
+        
+        final calculatedItemsPerPage = columns * rows;
+        
+        // If items per page changed, recalculate pages
+        if (calculatedItemsPerPage != _itemsPerPage) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            setState(() {
+              _itemsPerPage = calculatedItemsPerPage;
+            });
+            _recalculatePages();
+          });
+        }
+        
+        final buttonWidth = (constraints.maxWidth - (gridSpacing * (columns - 1))) / columns;
+        final buttonHeight = (constraints.maxHeight - (gridSpacing * (rows - 1))) / rows;
 
-  Widget _buildEmptyState() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.radio, size: 64, color: Colors.grey[600]),
-          const SizedBox(height: 16),
-          Text(
-            'No Channels Yet',
-            style: TextStyle(fontSize: 18, color: Colors.grey[400]),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Tap + to add your first channel',
-            style: TextStyle(fontSize: 14, color: Colors.grey[500]),
-          ),
-        ],
-      ),
+        return PageView.builder(
+          controller: _pageController,
+          itemCount: _channelPages.length,
+          onPageChanged: (page) {
+            setState(() {
+              _currentPage = page;
+            });
+          },
+          itemBuilder: (context, pageIndex) {
+            final channels = _channelPages[pageIndex];
+            
+            return GridView.builder(
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _itemsPerPage,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                crossAxisSpacing: gridSpacing,
+                mainAxisSpacing: gridSpacing,
+                childAspectRatio: buttonWidth / buttonHeight,
+              ),
+              itemBuilder: (context, i) {
+                // Show empty slot if no channel at this position
+                if (i >= channels.length) {
+                  return Card(
+                    color: const Color(0xFF2A2A2A),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    elevation: 0,
+                    child: const Center(
+                      child: Text(
+                        '---',
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                  );
+                }
+
+                final channel = channels[i];
+
+                return GestureDetector(
+                  onTap: () => _tuneToChannel(channel),
+                  onLongPress: () => _showChannelContextMenu(channel),
+                  child: Card(
+                    color: Colors.green[600],
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    elevation: 3,
+                    child: Stack(
+                      children: [
+                        // Main content
+                        Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  channel.channelName,
+                                  textAlign: TextAlign.center,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                channel.frequencyDisplay,
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        // Favorite star overlay (top-right corner)
+                        if (channel.favorite)
+                          const Positioned(
+                            top: 4,
+                            right: 4,
+                            child: Icon(
+                              Icons.star,
+                              color: Colors.amber,
+                              size: 16,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Conventional Channels'),
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(text: 'All'),
-            Tab(text: 'Favorites'),
-            Tab(text: 'Banks'),
-          ],
+    if (_isLoading) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF232323),
+        body: Center(
+          child: CircularProgressIndicator(),
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadData,
-            tooltip: 'Refresh',
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // Search bar
-          Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: TextField(
-              controller: _searchController,
-              decoration: InputDecoration(
-                hintText: 'Search channels...',
-                prefixIcon: const Icon(Icons.search),
-                suffixIcon: _searchController.text.isNotEmpty
-                    ? IconButton(
-                        icon: const Icon(Icons.clear),
-                        onPressed: () {
-                          _searchController.clear();
-                          _filterChannels();
-                        },
-                      )
-                    : null,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF232323),
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Header
+            Container(
+              padding: const EdgeInsets.all(12),
+              color: const Color(0xFF2A2A2A),
+              child: Row(
+                children: [
+                  const Icon(Icons.radio, color: Colors.cyan, size: 20),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Conventional Channels',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${_allChannels.length} channels',
+                    style: TextStyle(
+                      color: Colors.grey[400],
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  // Refresh button
+                  IconButton(
+                    icon: const Icon(Icons.refresh, size: 20),
+                    color: Colors.cyan[400],
+                    tooltip: 'Refresh',
+                    onPressed: _loadData,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                  const SizedBox(width: 8),
+                  // Add button
+                  IconButton(
+                    icon: const Icon(Icons.add, size: 20),
+                    color: Colors.green[400],
+                    tooltip: 'Add Channel',
+                    onPressed: () => _editChannel(null),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ],
+              ),
+            ),
+            // Bank filter dropdown
+            Container(
+              color: const Color(0xFF313131),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  const Text(
+                    'Filter:',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: DropdownButton<int>(
+                      value: _selectedBankId,
+                      isExpanded: true,
+                      dropdownColor: const Color(0xFF2A2A2A),
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                      underline: Container(
+                        height: 1,
+                        color: Colors.cyan,
+                      ),
+                      items: [
+                        const DropdownMenuItem<int>(
+                          value: -1,
+                          child: Text('All Channels'),
+                        ),
+                        const DropdownMenuItem<int>(
+                          value: 0,
+                          child: Row(
+                            children: [
+                              Icon(Icons.star, color: Colors.amber, size: 16),
+                              SizedBox(width: 8),
+                              Text('Favorites'),
+                            ],
+                          ),
+                        ),
+                        ..._banks.map((bank) => DropdownMenuItem<int>(
+                          value: bank.id,
+                          child: Text('${bank.bankName} (${bank.channelCount})'),
+                        )),
+                      ],
+                      onChanged: _onBankFilterChanged,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Grid (swipeable pages)
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: _buildChannelGrid(),
+              ),
+            ),
+            // Page indicator
+            if (_channelPages.length > 1)
+              Container(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      'Page ${_currentPage + 1} of ${_channelPages.length}',
+                      style: TextStyle(
+                        color: Colors.grey[400],
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              onChanged: (value) => _filterChannels(),
-            ),
-          ),
-          
-          // Bank selector (only on Banks tab)
-          if (_tabController.index == 2) _buildBankSelector(),
-          
-          // Channel list
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : _filteredChannels.isEmpty
-                    ? _buildEmptyState()
-                    : ListView.builder(
-                        itemCount: _filteredChannels.length,
-                        itemBuilder: (context, index) {
-                          return _buildChannelTile(_filteredChannels[index]);
-                        },
-                      ),
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _editChannel(null),
-        child: const Icon(Icons.add),
-        tooltip: 'Add Channel',
+          ],
+        ),
       ),
     );
   }

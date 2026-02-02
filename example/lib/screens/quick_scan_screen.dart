@@ -180,6 +180,10 @@ class _QuickScanScreenState extends State<QuickScanScreen> {
       
       // Clear any current system selection (Quick Scan mode = no system)
       widget.scanningService.clearCurrentSystem();
+      
+      // Set the channel name and frequency for display
+      widget.scanningService.setChannelName('Quick Scan');
+      widget.scanningService.setCurrentFrequency(freq);
 
       // Start scanning
       widget.onStart();

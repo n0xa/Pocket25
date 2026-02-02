@@ -99,6 +99,7 @@ class ScanningService extends ChangeNotifier {
   int? _currentSiteId;
   int? _previousSiteId; // Track previous site for detecting site switches
   String? _currentSiteName;
+  String? _currentChannelName; // For Quick Scan or Conventional channel name
   int? _currentSystemId;
   double? _currentFrequency;
   int _currentChannelIndex = 0;
@@ -116,6 +117,7 @@ class ScanningService extends ChangeNotifier {
   bool _hasLock = false;
   DateTime? _lastActivityTime;
   DateTime? _rtlTcpReconnectTime; // Track when we reconnected for buffer flush delay
+  DateTime? _channelSwitchTime; // Track when we switched channels to ignore stale data
   bool _gpsHoppingEnabled = false;
   Position? _lastPosition;
   
@@ -123,9 +125,14 @@ class ScanningService extends ChangeNotifier {
   int _tsbkCount = 0;
   int _parityMismatches = 0;
   DateTime? _lastTsbkTime;
+  int _consecutiveSyncs = 0; // Track consecutive syncs for reliable lock detection
   
   // Retune freeze tracking - unfreeze when new CC locks
   bool _pendingRetuneUnfreeze = false;
+  
+  // Channel quality tracking - remember which channels work
+  Map<int, int> _channelSuccessCount = {}; // channel index -> success count
+  int? _lastKnownGoodChannel; // Last channel that had reliable lock
   
   // Network information
   List<int> _neighborFreqs = []; // Neighbor site frequencies in Hz
@@ -148,6 +155,7 @@ class ScanningService extends ChangeNotifier {
   ScanningState get state => _state;
   int? get currentSiteId => _currentSiteId;
   String? get currentSiteName => _currentSiteName;
+  String? get currentChannelName => _currentChannelName;
   int? get currentSystemId => _currentSystemId;
   double? get currentFrequency => _currentFrequency;
   int get currentChannelIndex => _currentChannelIndex;
@@ -184,44 +192,26 @@ class ScanningService extends ChangeNotifier {
     _outputSubscription = _dsdPlugin.outputStream.listen((line) {
       // Parse frequency information from P25 FREQ lines
       // Example: "  P25 FREQ: map ch=0x15BC -> 771.181250 MHz"
+      // Note: These are output for ALL frequency lookups, not just the channel we're tuned to
+      // So we only use these for tracking downlink/uplink reference, not for updating the display
       if (line.contains('P25 FREQ:') && line.contains('MHz')) {
-        if (kDebugMode) {
-          print('DEBUG: Found P25 FREQ line: $line');
-        }
         final freqMatch = RegExp(r'([0-9.]+)\s*MHz').firstMatch(line);
         
         if (freqMatch != null) {
           final freq = double.tryParse(freqMatch.group(1) ?? '');
           
           if (freq != null) {
-            if (kDebugMode) {
-              print('DEBUG: Parsed frequency: $freq MHz');
-            }
-            
-            // Determine if downlink or uplink based on frequency range
+            // Track downlink/uplink for reference only
             if (freq >= 851 && freq <= 870) {
-              // 800 MHz band downlink
               _downlinkFreq = freq;
-              if (kDebugMode) print('DEBUG: Set as 800 MHz downlink');
-              _updateChannelIndexFromFrequency(freq);
             } else if (freq >= 806 && freq <= 825) {
-              // 800 MHz band uplink
               _uplinkFreq = freq;
-              if (kDebugMode) print('DEBUG: Set as 800 MHz uplink');
             } else if (freq >= 762 && freq <= 776) {
-              // 700 MHz band downlink
               _downlinkFreq = freq;
-              if (kDebugMode) print('DEBUG: Set as 700 MHz downlink');
-              _updateChannelIndexFromFrequency(freq);
             } else if (freq >= 792 && freq <= 806) {
-              // 700 MHz band uplink
               _uplinkFreq = freq;
-              if (kDebugMode) print('DEBUG: Set as 700 MHz uplink');
-            } else {
-              if (kDebugMode) print('DEBUG: Frequency $freq MHz not in known band ranges');
             }
-            
-            notifyListeners();
+            // Don't call notifyListeners() here - too frequent
           }
         }
       }
@@ -260,14 +250,31 @@ class ScanningService extends ChangeNotifier {
       }
       _parityMismatches = tsbkErr;
       
-      // For rtl_tcp: ignore lock for 8 seconds after reconnect to let buffer flush
+      // Ignore data during channel switch settle time (3 seconds)
+      // This prevents stale buffered data from the previous channel causing false locks
+      if (_channelSwitchTime != null) {
+        final timeSinceSwitch = DateTime.now().difference(_channelSwitchTime!);
+        if (timeSinceSwitch.inSeconds < 3) {
+          if (kDebugMode && hasSync) {
+            print('Ignoring sync during channel settle (${timeSinceSwitch.inMilliseconds}ms/3000ms)');
+          }
+          return; // Skip lock processing during settle period
+        } else {
+          _channelSwitchTime = null; // Settle period complete
+        }
+      }
+      
+      // For rtl_tcp: ignore lock for 12 seconds after reconnect to let buffer flush
       // Buffered samples from old frequency will cause false locks and auto-retune
+      // Increased from 8 to 12 seconds for larger buffers
       if (_settingsService.rtlSource == RtlSource.remote && _rtlTcpReconnectTime != null) {
         final timeSinceReconnect = DateTime.now().difference(_rtlTcpReconnectTime!);
-        if (timeSinceReconnect.inSeconds < 8) {
+        if (timeSinceReconnect.inSeconds < 12) {
           if (kDebugMode && hasSync) {
-            print('Ignoring lock during rtl_tcp buffer flush (${timeSinceReconnect.inSeconds}s/${8}s)');
+            print('Ignoring sync during rtl_tcp buffer flush (${timeSinceReconnect.inSeconds}s/12s)');
           }
+          // Also reset consecutive syncs to prevent false lock after flush
+          _consecutiveSyncs = 0;
           return; // Skip lock processing during flush period
         } else {
           // Flush period complete - reset protocol state if this was a site switch
@@ -284,39 +291,56 @@ class ScanningService extends ChangeNotifier {
             _pendingRetuneUnfreeze = false;
             // Unfreeze retunes now that old data is flushed - voice grants can now work
             _dsdPlugin.setRetuneFrozen(false);
+            // Reset consecutive syncs - require fresh syncs after flush
+            _consecutiveSyncs = 0;
           }
           _rtlTcpReconnectTime = null;
         }
       }
       
-      // For native USB site switches: reset protocol state when we first get sync
-      // This clears frequency tables from old site before DSD can use them for grants
-      if (_settingsService.rtlSource == RtlSource.nativeUsb && _pendingRetuneUnfreeze && hasSync) {
-        if (kDebugMode) {
-          print('Native USB site switch - resetting protocol state and unfreezing retunes');
-        }
-        // Reset P25 state for P25 systems
-        if (isP25) {
-          _dsdPlugin.resetP25State();
-        }
-        // TODO: Add resetDmrState() when available in plugin
-        _pendingRetuneUnfreeze = false;
-        // Unfreeze retunes now that we have sync on new site - voice grants can now work
-        _dsdPlugin.setRetuneFrozen(false);
-      }
-      
       // Update lock status based on sync (works for both P25 and DMR)
+      // Require multiple consecutive syncs to declare lock (prevents false lock from stale data)
       if (hasSync) {
-        _hasLock = true;
+        _consecutiveSyncs++;
         _lastActivityTime = DateTime.now();
         
-        if (_state == ScanningState.searching) {
-          _setState(ScanningState.locked);
-          if (kDebugMode) {
-            final protocol = isDMR ? 'DMR' : (isP25 ? 'P25' : 'Unknown');
-            print('$protocol Control channel LOCKED at $_currentFrequency MHz');
+        // Require at least 3 consecutive syncs to declare lock
+        if (_consecutiveSyncs >= 3 && !_hasLock) {
+          _hasLock = true;
+          
+          // Track this channel as successful
+          _channelSuccessCount[_currentChannelIndex] = 
+              (_channelSuccessCount[_currentChannelIndex] ?? 0) + 1;
+          _lastKnownGoodChannel = _currentChannelIndex;
+          
+          // For native USB: unfreeze retunes after confirming reliable lock
+          // This ensures we don't unfreeze based on stale buffered data
+          if (_settingsService.rtlSource == RtlSource.nativeUsb && _pendingRetuneUnfreeze) {
+            if (kDebugMode) {
+              print('Native USB confirmed lock - resetting protocol state and unfreezing retunes');
+            }
+            // Reset P25 state to clear any frequency tables from buffered data
+            if (isP25) {
+              _dsdPlugin.resetP25State();
+            }
+            _pendingRetuneUnfreeze = false;
+            // Unfreeze retunes now that we have confirmed lock - voice grants can now work
+            _dsdPlugin.setRetuneFrozen(false);
           }
+          
+          if (_state == ScanningState.searching) {
+            _setState(ScanningState.locked);
+            if (kDebugMode) {
+              final protocol = isDMR ? 'DMR' : (isP25 ? 'P25' : 'Unknown');
+              print('$protocol Control channel LOCKED at $_currentFrequency MHz (after $_consecutiveSyncs syncs)');
+            }
+          }
+        } else if (_hasLock) {
+          // Already locked, just update activity time
         }
+      } else {
+        // No sync - reset consecutive counter
+        _consecutiveSyncs = 0;
       }
       
       notifyListeners();
@@ -325,6 +349,22 @@ class ScanningService extends ChangeNotifier {
   
   void _listenToNetwork() {
     _networkSubscription = _dsdPlugin.networkEventStream.listen((event) {
+      // Ignore during channel settle period
+      if (_channelSwitchTime != null) {
+        final timeSinceSwitch = DateTime.now().difference(_channelSwitchTime!);
+        if (timeSinceSwitch.inSeconds < 3) {
+          return; // Skip during settle period
+        }
+      }
+      
+      // Ignore during rtl_tcp buffer flush period
+      if (_rtlTcpReconnectTime != null) {
+        final timeSinceReconnect = DateTime.now().difference(_rtlTcpReconnectTime!);
+        if (timeSinceReconnect.inSeconds < 12) {
+          return; // Skip during buffer flush
+        }
+      }
+      
       // Update neighbor sites from DSD state
       final neighborCount = event['neighborCount'] as int;
       final neighborFreqList = event['neighborFreqs'] as List<dynamic>;
@@ -428,14 +468,22 @@ class ScanningService extends ChangeNotifier {
       _previousSiteId = oldSiteId;
       _currentSiteId = siteId;
       _currentSiteName = siteName;
+      _currentChannelName = null; // Clear channel name when starting system scanning
       _currentChannelIndex = 0;
       _hasLock = false;
       _lastActivityTime = null;
+      _consecutiveSyncs = 0; // Reset sync counter
+      _channelSwitchTime = null; // Clear any pending settle time
+      _rtlTcpReconnectTime = null; // Clear any pending buffer flush
       
       // Reset signal quality tracking
       _tsbkCount = 0;
       _parityMismatches = 0;
       _lastTsbkTime = null;
+      
+      // Reset channel quality tracking for fresh start
+      _channelSuccessCount.clear();
+      _lastKnownGoodChannel = null;
       
       // Reset network information
       _neighborFreqs.clear();
@@ -445,6 +493,13 @@ class ScanningService extends ChangeNotifier {
       _affiliations.clear();
       _downlinkFreq = null;
       _uplinkFreq = null;
+      
+      // Reset P25 protocol state BEFORE starting new scan
+      // This clears frequency tables from previous site/session
+      await _dsdPlugin.resetP25State();
+      if (kDebugMode) {
+        print('Reset P25 state before starting new scan');
+      }
       
       // Get system ID if not provided
       if (systemId != null) {
@@ -508,7 +563,14 @@ class ScanningService extends ChangeNotifier {
     final channel = _controlChannels[_currentChannelIndex];
     _currentFrequency = channel['frequency'] as double;
     _hasLock = false;
-    _lastActivityTime = DateTime.now(); // Set initial time
+    _consecutiveSyncs = 0; // Reset sync counter for new channel
+    _channelSwitchTime = DateTime.now(); // Start settle timer
+    _lastActivityTime = null; // Don't set until we get real activity
+    
+    // Note: We do NOT set _rtlTcpReconnectTime here for control channel hopping.
+    // The long buffer flush is only set during initial connection in the rtl_tcp
+    // startup path below. For control channel hopping, the 3-second channel settle
+    // time is sufficient.
     
     if (kDebugMode) {
       print('Trying control channel ${_currentChannelIndex + 1}/${_controlChannels.length}: ${_currentFrequency} MHz');
@@ -560,51 +622,31 @@ class ScanningService extends ChangeNotifier {
           // Enable trunk following for P25 trunked systems
           await _dsdPlugin.setTrunkFollowing(true);
           
-          // Freeze retunes during initial startup to prevent old buffered data issues
+          // ALWAYS freeze retunes during initial startup to prevent old buffered data issues
           if (kDebugMode) {
             print('Freezing retunes during native USB startup');
           }
           await _dsdPlugin.setRetuneFrozen(true);
           
-          // For site switches, mark pending unfreeze so the timer below won't unfreeze
-          if (freezeRetunes) {
-            _pendingRetuneUnfreeze = true;
-            if (kDebugMode) {
-              print('Site switch - retunes will stay frozen');
-            }
+          // Mark pending unfreeze - will unfreeze after first sync when buffer settles
+          _pendingRetuneUnfreeze = true;
+          if (kDebugMode) {
+            print('Retunes will unfreeze after first sync (buffer settle)');
           }
           
           // Start the engine
           _onStart();
-          
-          // Unfreeze retunes after buffer settles (5 seconds for native USB)
-          // But only if this is NOT a site switch (site switches keep freeze until stop)
-          Future.delayed(const Duration(seconds: 5), () async {
-            // Don't unfreeze if a site switch set _pendingRetuneUnfreeze
-            if (!_pendingRetuneUnfreeze) {
-              if (kDebugMode) {
-                print('Unfreezing retunes after native USB startup');
-              }
-              await _dsdPlugin.setRetuneFrozen(false);
-            } else {
-              if (kDebugMode) {
-                print('Skipping unfreeze - site switch in progress');
-              }
-            }
-          });
         } else {
           // Device already open - need to stop engine, let it clean up USB, then restart with new frequency
           if (kDebugMode) {
             print('Retuning native USB RTL-SDR to ${_settingsService.frequencyHz} Hz');
           }
           
-          // Only freeze retunes during site switch, not control channel hopping
-          if (freezeRetunes) {
-            if (kDebugMode) {
-              print('Freezing retunes during native USB site switch');
-            }
-            await _dsdPlugin.setRetuneFrozen(true);
+          // ALWAYS freeze retunes during restart to prevent auto-retune based on stale data
+          if (kDebugMode) {
+            print('Freezing retunes during native USB restart');
           }
+          await _dsdPlugin.setRetuneFrozen(true);
           
           // Clear our tracking of the USB device - engine will close it during stop
           _settingsService.clearNativeUsbDevice();
@@ -653,12 +695,10 @@ class ScanningService extends ChangeNotifier {
           // Start engine with new configuration
           _onStart();
           
-          // Mark that we need to unfreeze when CC locks (only if we froze)
-          if (freezeRetunes) {
-            _pendingRetuneUnfreeze = true;
-            if (kDebugMode) {
-              print('Waiting for CC lock to unfreeze retunes');
-            }
+          // Mark that we need to unfreeze when first sync arrives
+          _pendingRetuneUnfreeze = true;
+          if (kDebugMode) {
+            print('Retunes will unfreeze after first sync');
           }
         }
       } else if (_settingsService.rtlSource == RtlSource.hackrf) {
@@ -725,14 +765,13 @@ class ScanningService extends ChangeNotifier {
         if (!_rtlTcpConnected || freezeRetunes) {
           // First connection or site switch - need full stop/reconnect/start
           
-          // Only freeze retunes during site switch to prevent old buffered
-          // P25 grants from retuning back to old site frequencies
-          if (freezeRetunes) {
-            if (kDebugMode) {
-              print('Freezing retunes during rtl_tcp site switch');
-            }
-            await _dsdPlugin.setRetuneFrozen(true);
+          // ALWAYS freeze retunes when starting fresh on rtl_tcp
+          // This prevents DSD from auto-retuning based on stale buffered TSBK data
+          // which could cause it to tune to a different frequency than we requested
+          if (kDebugMode) {
+            print('Freezing retunes during rtl_tcp startup');
           }
+          await _dsdPlugin.setRetuneFrozen(true);
           
           if (kDebugMode) {
             print('Reconnecting rtl_tcp at ${_settingsService.effectiveHost}:${_settingsService.effectivePort} freq ${_settingsService.frequencyHz} Hz');
@@ -754,12 +793,12 @@ class ScanningService extends ChangeNotifier {
           await _dsdPlugin.setTrunkFollowing(true);
           
           if (kDebugMode) {
-            if (freezeRetunes) {
-              print('Starting DSD with rtl_tcp at ${_settingsService.frequencyHz} Hz (retunes frozen until CC lock)');
-            } else {
-              print('Starting DSD with rtl_tcp at ${_settingsService.frequencyHz} Hz');
-            }
+            print('Starting DSD with rtl_tcp at ${_settingsService.frequencyHz} Hz (retunes frozen until buffer flush)');
           }
+          
+          // Set reconnect time BEFORE starting DSD to enable buffer flush period
+          // This ensures sync events that arrive during startup are properly filtered
+          _rtlTcpReconnectTime = DateTime.now();
           
           // Start DSD
           _onStart();
@@ -772,25 +811,20 @@ class ScanningService extends ChangeNotifier {
           // set by the connection string parsing. We don't need to re-apply here.
           // The native code at rtl_sdr_fm.cpp:2532 handles it.
           
-          // For site switches, explicitly retune to ensure rtl_tcp server changes frequency
+          // For all fresh starts, explicitly retune to ensure rtl_tcp server changes frequency
           // The connect() only configures DSD's input string, not the rtl_tcp server
-          if (freezeRetunes) {
-            if (kDebugMode) {
-              print('Sending explicit retune command to rtl_tcp server');
-            }
-            await _dsdPlugin.retune(_settingsService.frequencyHz);
-            
-            // Keep retunes frozen until we lock on the new site
-            // The freeze prevents DSD from auto-retuning back to old site frequencies
-            // that it learns from buffered data. We'll unfreeze when CC lock is detected.
-            _pendingRetuneUnfreeze = true;
-            if (kDebugMode) {
-              print('Retunes frozen until CC lock on new site');
-            }
+          if (kDebugMode) {
+            print('Sending explicit retune command to rtl_tcp server');
           }
+          await _dsdPlugin.retune(_settingsService.frequencyHz);
           
-          // Set reconnect time to enable buffer flush period
-          _rtlTcpReconnectTime = DateTime.now();
+          // Keep retunes frozen until buffer flush completes
+          // The freeze prevents DSD from auto-retuning based on stale buffered data
+          // which would cause display to be out of sync with actual tuned frequency
+          _pendingRetuneUnfreeze = true;
+          if (kDebugMode) {
+            print('Retunes frozen until buffer flush completes');
+          }
         } else {
           // Already connected - just retune without restarting DSD
           // This preserves P25 state machine for control channel hopping
@@ -805,11 +839,11 @@ class ScanningService extends ChangeNotifier {
               print('Retune failed, will try reconnect on next hop');
             }
             _rtlTcpConnected = false;
-          } else {
-            // Set reconnect time to enable buffer flush period
-            // Even with fast retune, rtl_tcp server still has buffered samples
-            _rtlTcpReconnectTime = DateTime.now();
           }
+          // Note: We do NOT set _rtlTcpReconnectTime for fast retunes during control
+          // channel hopping. The long buffer flush is only needed for full reconnects
+          // when switching from a different frequency/mode. Fast retunes have minimal
+          // latency and the 3-second channel settle time is sufficient.
         }
       }
       
@@ -830,29 +864,66 @@ class ScanningService extends ChangeNotifier {
 
     final now = DateTime.now();
     
+    // Don't check during channel settle period
+    if (_channelSwitchTime != null) {
+      final timeSinceSwitch = now.difference(_channelSwitchTime!);
+      if (timeSinceSwitch.inSeconds < 3) {
+        return; // Still settling
+      }
+    }
+    
     if (_state == ScanningState.locked) {
-      // Check if we've lost lock (no activity for 10 seconds)
-      // Activity is updated by network/patch/GA/AFF events (valid P25 data)
+      // Check if we've lost lock (no activity for 15 seconds)
+      // Increased from 10 to 15 to allow for brief quiet periods
       if (_lastActivityTime != null) {
         final timeSinceActivity = now.difference(_lastActivityTime!);
-        if (timeSinceActivity.inSeconds > 10) {
+        if (timeSinceActivity.inSeconds > 15) {
           if (kDebugMode) {
-            print('Lost lock on ${_currentFrequency} MHz (no data for 10s), trying next channel');
+            print('Lost lock on ${_currentFrequency} MHz (no data for 15s), trying next channel');
           }
           _hasLock = false;
-          _currentChannelIndex++;
+          _consecutiveSyncs = 0;
+          
+          // If we have a known good channel, try it first before cycling
+          if (_lastKnownGoodChannel != null && 
+              _lastKnownGoodChannel != _currentChannelIndex &&
+              _controlChannels.length > 1) {
+            if (kDebugMode) {
+              print('Switching back to last known good channel: ${_lastKnownGoodChannel! + 1}');
+            }
+            _currentChannelIndex = _lastKnownGoodChannel!;
+          } else {
+            _currentChannelIndex++;
+          }
+          
           _setState(ScanningState.searching);
           _tryNextControlChannel();
         }
       }
     } else if (_state == ScanningState.searching) {
-      // If still searching after 8 seconds, try next channel
-      if (_lastActivityTime != null && now.difference(_lastActivityTime!).inSeconds > 8) {
-        if (kDebugMode) {
-          print('No lock after 8 seconds, trying next channel');
+      // If still searching after 10 seconds with no activity, try next channel
+      // (increased from 8 to give more time for settle + lock)
+      if (_lastActivityTime == null) {
+        // No activity at all yet - use channel switch time
+        if (_channelSwitchTime != null) {
+          final timeSinceSwitch = now.difference(_channelSwitchTime!);
+          if (timeSinceSwitch.inSeconds > 10) {
+            if (kDebugMode) {
+              print('No activity after 10 seconds, trying next channel');
+            }
+            _currentChannelIndex++;
+            _tryNextControlChannel();
+          }
         }
-        _currentChannelIndex++;
-        _tryNextControlChannel();
+      } else {
+        final timeSinceActivity = now.difference(_lastActivityTime!);
+        if (timeSinceActivity.inSeconds > 10) {
+          if (kDebugMode) {
+            print('No lock after 10 seconds, trying next channel');
+          }
+          _currentChannelIndex++;
+          _tryNextControlChannel();
+        }
       }
     }
   }
@@ -903,21 +974,38 @@ class ScanningService extends ChangeNotifier {
   void _clearSystemState() {
     _currentSiteId = null;
     _currentSiteName = null;
+    _currentChannelName = null;
     _currentSystemId = null;
     _currentFrequency = null;
     _currentChannelIndex = 0;
     _controlChannels = [];
     _allSystemSites = [];
     _hasLock = false;
+    _consecutiveSyncs = 0;
+    _channelSwitchTime = null;
     _lastActivityTime = null;
     _pendingRetuneUnfreeze = false;
     _rtlTcpConnected = false; // Reset connection tracking
+    _channelSuccessCount.clear(); // Clear channel quality tracking
+    _lastKnownGoodChannel = null;
     notifyListeners();
   }
   
   /// Clear current system selection (for Quick Scan mode)
   void clearCurrentSystem() {
     _clearSystemState();
+  }
+  
+  /// Set channel name (for Quick Scan or Conventional mode)
+  void setChannelName(String? name) {
+    _currentChannelName = name;
+    notifyListeners();
+  }
+  
+  /// Set frequency manually (for Quick Scan or Conventional mode)
+  void setCurrentFrequency(double? frequency) {
+    _currentFrequency = frequency;
+    notifyListeners();
   }
   
   /// Set pending retune unfreeze flag (for Quick Scan frequency changes)
@@ -930,33 +1018,20 @@ class ScanningService extends ChangeNotifier {
     notifyListeners();
   }
   
-  /// Update the current channel index based on the actual frequency we're tuned to
+  /// Track which control channel a frequency corresponds to (for quality tracking)
+  /// This does NOT update the display - display is updated when we request a channel switch
   void _updateChannelIndexFromFrequency(double freq) {
-    // Only update if this frequency matches what we think we're tuned to
-    // P25 systems broadcast info about ALL channels, not just the one we're on
-    if (_currentFrequency != null && ((_currentFrequency! - freq).abs() > 0.001)) {
-      // This is a different channel being advertised, not the one we're on
-      return;
-    }
-    
     // Find which control channel matches this frequency (within 0.001 MHz tolerance)
     for (int i = 0; i < _controlChannels.length; i++) {
       final channelFreq = _controlChannels[i]['frequency'] as double;
       if ((channelFreq - freq).abs() < 0.001) {
-        if (_currentChannelIndex != i) {
-          _currentChannelIndex = i;
-          if (kDebugMode) {
-            print('Updated channel index to ${i + 1}/${_controlChannels.length} based on frequency $freq MHz');
-          }
-          notifyListeners();
+        // This frequency is a known control channel - track it as successful
+        if (_hasLock && _currentChannelIndex == i) {
+          _channelSuccessCount[i] = (_channelSuccessCount[i] ?? 0) + 1;
+          _lastKnownGoodChannel = i;
         }
         return;
       }
-    }
-    
-    // If we didn't find a match, log it
-    if (kDebugMode) {
-      print('Warning: Could not find channel index for frequency $freq MHz');
     }
   }
   
