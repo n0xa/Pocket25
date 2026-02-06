@@ -1,0 +1,96 @@
+name: Nightly Build
+
+on:
+  schedule:
+    # Run at 4:00 AM UTC every day
+    - cron: '0 4 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.1'
+          channel: 'stable'
+      
+      - name: Get current version
+        id: version
+        run: |
+          cd example
+          VERSION=$(grep "^version:" pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
+          BUILD=$(grep "^version:" pubspec.yaml | sed 's/.*+//')
+          DATE=$(date +%Y%m%d)
+          NIGHTLY_VERSION="${VERSION}-nightly.${DATE}+${BUILD}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "build=${BUILD}" >> $GITHUB_OUTPUT
+          echo "nightly_version=${NIGHTLY_VERSION}" >> $GITHUB_OUTPUT
+          echo "date=${DATE}" >> $GITHUB_OUTPUT
+      
+      - name: Update version for nightly
+        run: |
+          cd example
+          sed -i "s/^version:.*$/version: ${{ steps.version.outputs.nightly_version }}/" pubspec.yaml
+          echo "Building nightly version: ${{ steps.version.outputs.nightly_version }}"
+      
+      - name: Install dependencies
+        run: |
+          cd example
+          flutter pub get
+      
+      - name: Build APK
+        run: |
+          cd example
+          flutter build apk --release
+      
+      - name: Rename APK
+        run: |
+          cd example
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             build/app/outputs/flutter-apk/pocket25-nightly-${{ steps.version.outputs.date }}.apk
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: nightly-${{ steps.version.outputs.date }}
+          name: Nightly Build ${{ steps.version.outputs.date }}
+          body: |
+            ## 🌙 Nightly Build - ${{ steps.version.outputs.date }}
+            
+            **Version:** ${{ steps.version.outputs.nightly_version }}
+            
+            This is an automated nightly build from the latest master branch.
+            
+            ⚠️ **Warning:** Nightly builds are for testing purposes and may be unstable.
+            
+            ### Installation
+            Download and install the APK below.
+            
+            ### Changes
+            See commit history for latest changes.
+          files: |
+            example/build/app/outputs/flutter-apk/pocket25-nightly-${{ steps.version.outputs.date }}.apk
+          prerelease: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Clean up old nightly releases
+        uses: dev-drprasad/delete-older-releases@v0.3.2
+        with:
+          keep_latest: 7 # Keep last 7 nightly builds
+          delete_tag_pattern: nightly- # Only delete nightly tags
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

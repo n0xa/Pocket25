@@ -1,0 +1,72 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*.*.*' # Trigger on version tags like v1.0.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.1'
+          channel: 'stable'
+      
+      - name: Get version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+      
+      - name: Install dependencies
+        run: |
+          cd example
+          flutter pub get
+      
+      - name: Build APK
+        run: |
+          cd example
+          flutter build apk --release
+      
+      - name: Rename APK
+        run: |
+          cd example
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             build/app/outputs/flutter-apk/pocket25-v${{ steps.version.outputs.version }}.apk
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Pocket25 v${{ steps.version.outputs.version }}
+          body: |
+            ## 🚀 Release v${{ steps.version.outputs.version }}
+            
+            ### Installation
+            Download the APK below and install on your Android device.
+            
+            ### What's New
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md) for details.
+            
+            ---
+            
+            Support development: [Patreon](https://patreon.com/sarahroselives) | [One-time donation](https://pocket25.com/donate.php)
+          files: |
+            example/build/app/outputs/flutter-apk/pocket25-v${{ steps.version.outputs.version }}.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

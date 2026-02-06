@@ -201,6 +201,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(height: 12),
             _buildMenuTile(
               context,
+              title: 'Donate/Support',
+              subtitle: 'Support the development',
+              icon: Icons.favorite,
+              iconColor: Colors.pink[300]!,
+              onTap: () {
+                _showDonateDialog();
+              },
+            ),
+            const SizedBox(height: 12),
+            _buildMenuTile(
+              context,
               title: 'About',
               subtitle: 'App version and information',
               icon: Icons.info_outline,
@@ -371,6 +382,130 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  void _showDonateDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.favorite, color: Colors.pink),
+            SizedBox(width: 12),
+            Text('Support Development'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Thank you for supporting this project!',
+              style: TextStyle(fontSize: 14),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            InkWell(
+              onTap: () {
+                Navigator.of(context).pop();
+                _launchUrl('https://patreon.com/sarahroselives');
+              },
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                child: const Row(
+                  children: [
+                    Icon(Icons.card_membership, color: Colors.orange, size: 28),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Monthly Support',
+                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            'via Patreon',
+                            style: TextStyle(fontSize: 12, color: Colors.grey),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const Divider(height: 8),
+            InkWell(
+              onTap: () {
+                Navigator.of(context).pop();
+                _launchUrl('https://pocket25.com/donate.php');
+              },
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                child: const Row(
+                  children: [
+                    Icon(Icons.payment, color: Colors.green, size: 28),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'One-Time Donation',
+                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            'via Stripe',
+                            style: TextStyle(fontSize: 12, color: Colors.grey),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _launchUrl(String urlString) async {
+    final uri = Uri.parse(urlString);
+    try {
+      final canLaunch = await canLaunchUrl(uri);
+      if (canLaunch) {
+        await launchUrl(
+          uri,
+          mode: LaunchMode.externalApplication,
+        );
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Could not open browser'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error opening link: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   Widget _buildMenuTile(
