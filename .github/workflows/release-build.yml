@@ -32,6 +32,15 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building version: ${VERSION}"
       
+      - name: Decode and setup keystore
+        run: |
+          cd example/android
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/pocket25-release-key.jks
+          echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" > key.properties
+          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> key.properties
+          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> key.properties
+          echo "storeFile=pocket25-release-key.jks" >> key.properties
+      
       - name: Install dependencies
         run: |
           cd example
