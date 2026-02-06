@@ -11,7 +11,7 @@ class LogScreen extends StatelessWidget {
   });
 
   Color _getLineColor(String line) {
-    if (line.contains('P25') || line.contains('TSBK')) {
+    if (line.contains('P25') || line.contains('BER')) {
       return Colors.cyan;
     } else if (line.contains('TG:') || line.contains('talkgroup')) {
       return Colors.yellow;

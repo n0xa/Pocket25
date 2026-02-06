@@ -123,9 +123,11 @@ class ScanningService extends ChangeNotifier {
   
   // Signal quality tracking
   int _tsbkCount = 0;
+  int _tsbkErrors = 0;
   int _parityMismatches = 0;
   DateTime? _lastTsbkTime;
   int _consecutiveSyncs = 0; // Track consecutive syncs for reliable lock detection
+  bool _isP25 = false; // Track if current protocol is P25 (for BER display)
   
   // Retune freeze tracking - unfreeze when new CC locks
   bool _pendingRetuneUnfreeze = false;
@@ -163,9 +165,19 @@ class ScanningService extends ChangeNotifier {
   bool get hasLock => _hasLock;
   bool get gpsHoppingEnabled => _gpsHoppingEnabled;
   Position? get lastPosition => _lastPosition;
+  bool get isP25 => _isP25;
   int get tsbkCount => _tsbkCount;
+  int get tsbkErrors => _tsbkErrors;
   int get parityMismatches => _parityMismatches;
   DateTime? get lastTsbkTime => _lastTsbkTime;
+  
+  // Calculate BER (Bit Error Rate) as a percentage
+  // Note: Only works for P25 - DMR doesn't expose FEC counters, will show 0%
+  double get ber {
+    final total = _tsbkCount + _tsbkErrors;
+    if (total == 0) return 0.0;
+    return (_tsbkErrors / total) * 100.0;
+  }
   List<int> get neighborFreqs => _neighborFreqs;
   List<int> get neighborLastSeen => _neighborLastSeen;
   List<Map<String, dynamic>> get patches => _patches;
@@ -228,6 +240,8 @@ class ScanningService extends ChangeNotifier {
       }
       
       // Update TSBK counts from DSD state (more reliable than parsing)
+      // Note: These counters are P25-specific (p25_p1_fec_ok/err)
+      // For DMR, these values will remain at 0, so BER will show 0%
       final tsbkOk = event['tsbkOk'] as int? ?? 0;
       final tsbkErr = event['tsbkErr'] as int? ?? 0;
       final hasSync = event['hasSync'] as bool? ?? false;
@@ -239,14 +253,26 @@ class ScanningService extends ChangeNotifier {
       final isDMR = (synctype >= 10 && synctype <= 13) || (synctype >= 32 && synctype <= 34);
       final isP25 = (synctype >= 0 && synctype <= 1) || (synctype >= 35 && synctype <= 36);
       
+      // Update protocol state
+      if (hasSync && isP25) {
+        _isP25 = true;
+      } else if (hasSync && isDMR) {
+        _isP25 = false;
+      }
+      
       if (kDebugMode && hasSync) {
         print('Sync detected: synctype=$synctype (DMR: $isDMR, P25: $isP25)');
       }
       
-      // Update counters
-      if (tsbkOk > _tsbkCount) {
-        _tsbkCount = tsbkOk;
-        _lastTsbkTime = DateTime.now();
+      // Update counters (only meaningful for P25)
+      if (isP25) {
+        if (tsbkOk > _tsbkCount) {
+          _tsbkCount = tsbkOk;
+          _lastTsbkTime = DateTime.now();
+        }
+        if (tsbkErr > _tsbkErrors) {
+          _tsbkErrors = tsbkErr;
+        }
       }
       _parityMismatches = tsbkErr;
       

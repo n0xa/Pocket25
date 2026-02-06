@@ -215,11 +215,11 @@ class ScannerScreen extends StatelessWidget {
                             ),
                           ),
                         ),
-                        if (scanningService.tsbkCount > 0) ...[
+                        if (scanningService.isP25 && scanningService.tsbkCount > 0) ...[
                           SizedBox(width: _spacing(context, 12)),
                           _buildCompactInfoRow(
                             Icons.swap_vert,
-                            'TSBK: ${scanningService.tsbkCount}',
+                            'BER: ${scanningService.ber.toStringAsFixed(1)}%',
                             Colors.teal,
                             context,
                           ),
